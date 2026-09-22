@@ -30,7 +30,7 @@ def siapkan_nltk():
 def muat_sbert():
     try:
         from sentence_transformers import SentenceTransformer
-        return SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+        return SentenceTransformer("intfloat/multilingual-e5-small")
     except Exception:
         return None  # fallback ke TF-IDF
 
@@ -89,7 +89,7 @@ def muat_data():
 
 
 # ---------------------------------------------------------------
-# 4. Engine chatbot (sama seperti Langkah 5, termasuk perbaikan keyword boost)
+# 4. Engine chatbot (seperti Langkah 5 + perbaikan keyword boost, model e5, tanpa konteks)
 # ---------------------------------------------------------------
 class MedicalChatbotEngineV3:
     def __init__(self, dataframe, threshold=0.35, top_k=10):
@@ -101,7 +101,9 @@ class MedicalChatbotEngineV3:
 
     def _build_index(self):
         if USE_SBERT:
-            self.sbert_embeddings = SBERT_MODEL.encode(self.df['question'].tolist(), convert_to_tensor=True)
+            # model e5 wajib memakai awalan "passage: " untuk data
+            self.sbert_embeddings = SBERT_MODEL.encode(
+                ["passage: " + q for q in self.df['question'].tolist()], convert_to_tensor=True)
         self.vectorizer = TfidfVectorizer(ngram_range=(1, 2), max_features=5000, sublinear_tf=True)
         self.tfidf_matrix = self.vectorizer.fit_transform(self.df['processed_question'])
 
@@ -126,7 +128,8 @@ class MedicalChatbotEngineV3:
 
     def _search_sbert(self, query):
         from sentence_transformers import util
-        emb = SBERT_MODEL.encode(query, convert_to_tensor=True)
+        # model e5 wajib memakai awalan "query: " untuk pertanyaan
+        emb = SBERT_MODEL.encode("query: " + query, convert_to_tensor=True)
         scores = util.cos_sim(emb, self.sbert_embeddings)[0].cpu().numpy()
         top = np.argsort(-scores)[:self.top_k]
         return [(idx, float(scores[idx])) for idx in top]
@@ -146,7 +149,7 @@ class MedicalChatbotEngineV3:
             return rule
 
         # konteks dari input sebelumnya (disimpan per pengguna di session_state)
-        query = user_input
+        query = user_input  # tanpa konteks percakapan sebelumnya
 
         if USE_SBERT:
             results, method = self._search_sbert(query), "SBERT"
@@ -196,7 +199,7 @@ if "history" not in st.session_state:
 
 with st.sidebar:
     st.subheader("Tentang")
-    st.write(f"Metode pencarian: **{'Sentence-BERT' if USE_SBERT else 'TF-IDF'}**")
+    st.write(f"Metode pencarian: **{'Sentence embedding (multilingual-e5-small)' if USE_SBERT else 'TF-IDF'}**")
     st.write(f"Jumlah data: **{len(bot.df)}** pasangan tanya-jawab")
     st.write("Sumber data: [agufsamudra/alodokter-qna](https://huggingface.co/datasets/agufsamudra/alodokter-qna)")
     if st.button("🗑️ Mulai percakapan baru"):
