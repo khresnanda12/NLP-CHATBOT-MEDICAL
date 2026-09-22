@@ -146,7 +146,7 @@ class MedicalChatbotEngineV3:
             return rule
 
         # konteks dari input sebelumnya (disimpan per pengguna di session_state)
-        query = (history[-1] + " " + user_input) if history else user_input
+        query = user_input
 
         if USE_SBERT:
             results, method = self._search_sbert(query), "SBERT"
