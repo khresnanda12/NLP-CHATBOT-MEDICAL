@@ -89,12 +89,11 @@ def muat_data():
 
 
 # ---------------------------------------------------------------
-# 4. Engine chatbot (seperti Langkah 5 + perbaikan keyword boost, model e5, tanpa konteks)
+# 4. Engine chatbot (alur seperti Langkah 5, pencarian hybrid e5 + TF-IDF, tanpa konteks)
 # ---------------------------------------------------------------
 class MedicalChatbotEngineV3:
-    def __init__(self, dataframe, threshold=0.35, top_k=10):
+    def __init__(self, dataframe, top_k=5):
         self.df = dataframe
-        self.threshold = threshold if USE_SBERT else 0.15
         self.top_k = top_k
         self._build_index()
         self._define_rules()
@@ -103,7 +102,7 @@ class MedicalChatbotEngineV3:
         if USE_SBERT:
             # model e5 wajib memakai awalan "passage: " untuk data
             self.sbert_embeddings = SBERT_MODEL.encode(
-                ["passage: " + q for q in self.df['question'].tolist()], convert_to_tensor=True)
+                ["passage: " + q for q in self.df['question'].tolist()], normalize_embeddings=True)
         self.vectorizer = TfidfVectorizer(ngram_range=(1, 2), max_features=5000, sublinear_tf=True)
         self.tfidf_matrix = self.vectorizer.fit_transform(self.df['processed_question'])
 
@@ -126,19 +125,27 @@ class MedicalChatbotEngineV3:
                     return random.choice(data['responses'])
         return None
 
-    def _search_sbert(self, query):
-        from sentence_transformers import util
-        # model e5 wajib memakai awalan "query: " untuk pertanyaan
-        emb = SBERT_MODEL.encode("query: " + query, convert_to_tensor=True)
-        scores = util.cos_sim(emb, self.sbert_embeddings)[0].cpu().numpy()
-        top = np.argsort(-scores)[:self.top_k]
-        return [(idx, float(scores[idx])) for idx in top]
-
     def _search_tfidf(self, query):
         vec = self.vectorizer.transform([preprocess_text(query)])
-        scores = cosine_similarity(vec, self.tfidf_matrix).flatten()
-        top = np.argsort(scores)[::-1][:self.top_k]
-        return [(idx, float(scores[idx])) for idx in top]
+        return cosine_similarity(vec, self.tfidf_matrix).flatten()
+
+    def _search_hybrid(self, query):
+        """Gabungan makna (embedding) + kata kunci (TF-IDF).
+        Embedding saja sering tertipu pola kalimat ("cara mengatasi ..."),
+        TF-IDF memastikan kata kunci penyakit (misal "diare") ikut menentukan."""
+        tfidf_scores = self._search_tfidf(query)
+        if USE_SBERT:
+            emb = SBERT_MODEL.encode(["query: " + query], normalize_embeddings=True)[0]
+            sem_scores = self.sbert_embeddings @ emb
+
+            def normalisasi(x):
+                return (x - x.min()) / (x.max() - x.min() + 1e-9)
+
+            scores = 0.4 * normalisasi(sem_scores) + 0.6 * normalisasi(tfidf_scores)
+        else:
+            scores = tfidf_scores
+        top = np.argsort(-scores)[:self.top_k]
+        return [(idx, float(scores[idx])) for idx in top], float(tfidf_scores.max())
 
     def get_response(self, user_input, history):
         if not user_input.strip():
@@ -148,26 +155,16 @@ class MedicalChatbotEngineV3:
         if rule:
             return rule
 
-        # konteks dari input sebelumnya (disimpan per pengguna di session_state)
         query = user_input  # tanpa konteks percakapan sebelumnya
 
-        if USE_SBERT:
-            results, method = self._search_sbert(query), "SBERT"
-        else:
-            results, method = self._search_tfidf(query), "TF-IDF"
+        results, max_kata_kunci = self._search_hybrid(query)
+        method = "Hybrid (e5 + TF-IDF)" if USE_SBERT else "TF-IDF"
 
-        if results[0][1] < self.threshold:
+        # tolak jika tidak ada satu pun kata kunci yang cocok dengan data
+        if max_kata_kunci < 0.05:
             return "🤔 Tidak menemukan jawaban yang cukup relevan."
 
-        kata_umum = {"mengatasi", "mengobati", "menghilangkan", "gejala", "penyebab", "obat"}
-        boosted = []
-        for idx, score in results:
-            text = self.df.iloc[idx]['question']
-            bonus = sum(1 for word in preprocess_text(user_input).split()
-                        if word not in kata_umum and word in text.lower())
-            boosted.append((idx, score + 0.05 * bonus))
-
-        best_idx = sorted(boosted, key=lambda x: x[1], reverse=True)[0][0]
+        best_idx = results[0][0]
         row = self.df.iloc[best_idx]
         history.append(user_input)
 
@@ -199,7 +196,7 @@ if "history" not in st.session_state:
 
 with st.sidebar:
     st.subheader("Tentang")
-    st.write(f"Metode pencarian: **{'Sentence embedding (multilingual-e5-small)' if USE_SBERT else 'TF-IDF'}**")
+    st.write(f"Metode pencarian: **{'Hybrid: e5 embedding + TF-IDF' if USE_SBERT else 'TF-IDF'}**")
     st.write(f"Jumlah data: **{len(bot.df)}** pasangan tanya-jawab")
     st.write("Sumber data: [agufsamudra/alodokter-qna](https://huggingface.co/datasets/agufsamudra/alodokter-qna)")
     if st.button("🗑️ Mulai percakapan baru"):
